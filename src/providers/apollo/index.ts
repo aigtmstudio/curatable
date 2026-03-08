@@ -46,51 +46,50 @@ export class ApolloProvider extends BaseProvider implements DataProvider {
 
   async searchCompanies(params: CompanySearchParams): Promise<PaginatedResponse<UnifiedCompany>> {
     try {
-      const body: Record<string, unknown> = {
-        per_page: Math.min(params.limit ?? 25, 100),
-        page: params.offset ? Math.floor(params.offset / 100) + 1 : 1,
-      };
+      const targetLimit = params.limit ?? 25;
+      const maxPages = Math.min(Math.ceil(targetLimit / 100), 25); // safety cap: 2,500 results
+      const allCompanies: UnifiedCompany[] = [];
+      const seenDomains = new Set<string>();
+      let totalEntries = 0;
+      let totalPages = 0;
+      const startPage = params.offset ? Math.floor(params.offset / 100) + 1 : 1;
 
-      if (params.industries?.length) body.organization_industries = params.industries;
-      if (params.employeeCountMin != null || params.employeeCountMax != null) {
-        body.organization_num_employees_ranges = buildEmployeeRanges(
-          params.employeeCountMin, params.employeeCountMax,
+      const body = this.buildSearchBody(params);
+
+      for (let i = 0; i < maxPages; i++) {
+        const pageNum = startPage + i;
+        const raw = await this.request<ApolloCompanySearchResponse>(
+          'post', '/mixed_companies/search', { body: { ...body, page: pageNum, per_page: 100 } },
         );
+
+        totalEntries = raw.pagination.total_entries;
+        totalPages = raw.pagination.total_pages;
+
+        if (!raw.organizations?.length) break;
+
+        for (const org of raw.organizations) {
+          const company = mapApolloOrganization(org);
+          const domain = company.domain?.toLowerCase();
+          if (domain && seenDomains.has(domain)) continue;
+          if (domain) seenDomains.add(domain);
+          allCompanies.push(company);
+        }
+
+        this.log.info(
+          { page: pageNum, totalPages, totalEntries, accumulated: allCompanies.length, targetLimit },
+          'Apollo search page fetched',
+        );
+
+        if (allCompanies.length >= targetLimit) break;
+        if (pageNum >= totalPages) break;
       }
 
-      // Revenue and funding stage are intentionally excluded — they over-constrain
-      // Apollo searches and commonly return 0 results. Post-discovery ICP scoring
-      // handles these dimensions instead.
-
-      // Build location filters: countries + states + cities
-      // Apollo expects full country names (e.g. "United Kingdom"), not ISO codes (e.g. "GB")
-      const locations: string[] = [];
-      if (params.countries?.length) locations.push(...params.countries.map(expandCountryCode));
-      if (params.states?.length) locations.push(...params.states);
-      if (params.cities?.length) locations.push(...params.cities);
-      if (locations.length) body.organization_locations = locations;
-
-      // q_keywords supports freeform keyword search across company name/description.
-      // Unlike q_organization_keyword_tags (which requires Apollo taxonomy IDs), this
-      // accepts plain strings. Join include keywords into a single space-separated query.
-      if (params.keywords?.length) {
-        body.q_keywords = params.keywords.join(' ');
-      }
-
-      // Note: currently_using_any_of_technology_uids requires Apollo UIDs, not human-readable
-      // tech names like "React" or "PoS". Skipping — scoring handles tech stack matching.
-
-      const raw = await this.request<ApolloCompanySearchResponse>(
-        'post', '/mixed_companies/search', { body },
-      );
-
-      const companies = raw.organizations.map(mapApolloOrganization);
       return {
         success: true,
-        data: companies,
-        totalResults: raw.pagination.total_entries,
-        hasMore: raw.pagination.page < raw.pagination.total_pages,
-        nextPageToken: raw.pagination.page + 1,
+        data: allCompanies,
+        totalResults: totalEntries,
+        hasMore: allCompanies.length < totalEntries,
+        nextPageToken: startPage + Math.min(maxPages, totalPages),
         creditsConsumed: 0,
         fieldsPopulated: ['name', 'domain', 'industry'],
         qualityScore: 0.5,
@@ -106,6 +105,44 @@ export class ApolloProvider extends BaseProvider implements DataProvider {
         error: String(error), creditsConsumed: 0, fieldsPopulated: [], qualityScore: 0,
       };
     }
+  }
+
+  private buildSearchBody(params: CompanySearchParams): Record<string, unknown> {
+    const body: Record<string, unknown> = {};
+
+    if (params.industries?.length) body.organization_industries = params.industries;
+    if (params.employeeCountMin != null || params.employeeCountMax != null) {
+      body.organization_num_employees_ranges = buildEmployeeRanges(
+        params.employeeCountMin, params.employeeCountMax,
+      );
+    }
+
+    // Revenue and funding stage intentionally excluded — they over-constrain
+    // Apollo searches. Post-discovery ICP scoring handles these dimensions.
+
+    // Location filters: Apollo expects full country names, not ISO codes
+    const locations: string[] = [];
+    if (params.countries?.length) locations.push(...params.countries.map(expandCountryCode));
+    if (params.states?.length) locations.push(...params.states);
+    if (params.cities?.length) locations.push(...params.cities);
+    if (locations.length) body.organization_locations = locations;
+
+    // Use q_organization_keyword_tags (OR-based, relevance-ranked) instead of
+    // q_keywords (freeform AND-like text search). Tags match Apollo's company-level
+    // keyword taxonomy — more matching tags = higher relevance rank.
+    if (params.keywords?.length) {
+      body.q_organization_keyword_tags = params.keywords;
+    }
+
+    // Exclude keywords via q_not_keywords (negative freeform search)
+    if (params.excludeKeywords?.length) {
+      body.q_not_keywords = params.excludeKeywords.join(' ');
+    }
+
+    // Tech stack requires Apollo UIDs, not human-readable names — skipped.
+    // Scoring handles tech stack matching post-discovery.
+
+    return body;
   }
 
   async enrichCompany(params: CompanyEnrichParams): Promise<ProviderResponse<UnifiedCompany>> {

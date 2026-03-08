@@ -90,6 +90,8 @@ export interface CompanySearchParams {
   states?: string[];
   cities?: string[];
   keywords?: string[];
+  excludeKeywords?: string[];
+  excludeIndustries?: string[];
   limit?: number;
   offset?: number;
 }

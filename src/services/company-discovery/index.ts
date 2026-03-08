@@ -1173,6 +1173,10 @@ Return [] if none found.`;
     if (hints?.keywordSearchTerms?.length) keywords.push(...hints.keywordSearchTerms);
     if (keywords.length) params.keywords = [...new Set(keywords)];
 
+    // Pass exclude filters through to providers (Apollo supports q_not_keywords)
+    if (filters.excludeKeywords?.length) params.excludeKeywords = filters.excludeKeywords;
+    if (filters.excludeIndustries?.length) params.excludeIndustries = filters.excludeIndustries;
+
     return params;
   }
 

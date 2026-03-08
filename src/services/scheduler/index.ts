@@ -8,6 +8,8 @@ export const JOB_TYPES = {
   ENRICHMENT: 'enrichment',
   EXPORT: 'export',
   MARKET_SIGNAL_PROCESSING: 'market-signal-processing',
+  DEMO_SIGNAL_REFRESH: 'demo-signal-refresh',
+  DEMO_BUZZ_PREGENERATE: 'demo-buzz-pregenerate',
 } as const;
 
 export class Scheduler {
@@ -120,6 +122,41 @@ export class Scheduler {
         });
       }
     }
+  }
+
+  async registerDemoJobs(handlers: {
+    onSignalRefresh: () => Promise<void>;
+    onBuzzPregenerate: () => Promise<void>;
+  }, demoClientId: string): Promise<void> {
+    await this.boss.work(JOB_TYPES.DEMO_SIGNAL_REFRESH, async (jobs: PgBoss.Job[]) => {
+      for (const job of jobs) {
+        logger.info({ jobId: job.id }, 'Running demo signal refresh');
+        await handlers.onSignalRefresh();
+      }
+    });
+
+    await this.boss.work(JOB_TYPES.DEMO_BUZZ_PREGENERATE, async (jobs: PgBoss.Job[]) => {
+      for (const job of jobs) {
+        logger.info({ jobId: job.id }, 'Running demo buzz pre-generation');
+        await handlers.onBuzzPregenerate();
+      }
+    });
+
+    // Daily at 05:30 UTC — refresh demo signals
+    await this.boss.schedule(
+      JOB_TYPES.DEMO_SIGNAL_REFRESH,
+      '30 5 * * *',
+      { clientId: demoClientId },
+    );
+
+    // Daily at 06:00 UTC — pre-generate buzz reports (after signals are fresh)
+    await this.boss.schedule(
+      JOB_TYPES.DEMO_BUZZ_PREGENERATE,
+      '0 6 * * *',
+      { clientId: demoClientId },
+    );
+
+    logger.info('Demo cron jobs registered (signals 05:30 UTC, buzz 06:00 UTC)');
   }
 
   async stop(): Promise<void> {

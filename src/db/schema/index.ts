@@ -19,3 +19,4 @@ export * from './webinar-speakers.js';
 export * from './influencers.js';
 export * from './competitor-monitoring.js';
 export * from './market-builder.js';
+export * from './demo.js';

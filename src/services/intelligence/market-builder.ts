@@ -396,7 +396,7 @@ export class MarketBuilderService {
         }).returning();
         try {
           const r = await this.listBuilder.buildListWithDiscovery({
-            clientId, listId, icpId, jobId: job.id, limit: p.limit,
+            clientId, listId, icpId, jobId: job.id, limit: p.limit ?? 250,
           });
           await db.update(schema.jobs).set({ status: 'completed', completedAt: new Date() }).where(eq(schema.jobs.id, job.id));
           return { found: r.discovery.companiesDiscovered, added: r.companiesAdded };

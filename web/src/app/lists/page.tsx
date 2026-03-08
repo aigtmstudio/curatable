@@ -385,7 +385,7 @@ export default function ListsPage() {
                     setAiPlanLoading(true);
                     setAiPlanOpen(true);
                     try {
-                      const plan = await marketBuilderApi.generateMarketPlan(clientId);
+                      const plan = await marketBuilderApi.generateMarketPlan(clientId, list.icpId ?? undefined);
                       setAiPlan(plan);
                       setAiSavedPlan(null);
                       setAiPlanFeedback('');

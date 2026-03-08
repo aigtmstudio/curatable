@@ -53,8 +53,8 @@ export interface SavedPlan {
   updatedAt: string;
 }
 
-export async function generateMarketPlan(clientId: string): Promise<MarketBuilderPlan> {
-  const res = await apiClient.post<ApiResponse<MarketBuilderPlan>>('/api/market-builder/plan/generate', { clientId });
+export async function generateMarketPlan(clientId: string, icpId?: string): Promise<MarketBuilderPlan> {
+  const res = await apiClient.post<ApiResponse<MarketBuilderPlan>>('/api/market-builder/plan/generate', { clientId, icpId });
   return res.data;
 }
 

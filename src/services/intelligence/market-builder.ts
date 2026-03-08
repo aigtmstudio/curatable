@@ -104,15 +104,15 @@ export class MarketBuilderService {
 
   // ── Plan generation ──────────────────────────────────────────────────────────
 
-  async generatePlan(clientId: string): Promise<MarketBuilderPlan> {
+  async generatePlan(clientId: string, icpId?: string): Promise<MarketBuilderPlan> {
     const db = getDb();
 
-    // Load active ICP
-    const [icp] = await db
-      .select()
-      .from(schema.icps)
-      .where(and(eq(schema.icps.clientId, clientId), eq(schema.icps.isActive, true)))
-      .limit(1);
+    // Load specific ICP if provided, otherwise first active ICP
+    const [icp] = icpId
+      ? await db.select().from(schema.icps).where(eq(schema.icps.id, icpId)).limit(1)
+      : await db.select().from(schema.icps)
+          .where(and(eq(schema.icps.clientId, clientId), eq(schema.icps.isActive, true)))
+          .limit(1);
 
     // Load past approved plans (all clients) for few-shot examples
     const pastPlans = await this.loadApprovedPlans(5);

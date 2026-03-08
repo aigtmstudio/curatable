@@ -6,6 +6,7 @@ import type { MarketBuilderPlan } from '../../services/intelligence/market-build
 
 const generateBody = z.object({
   clientId: z.string().uuid(),
+  icpId: z.string().uuid().optional(),
 });
 
 const refineBody = z.object({
@@ -43,10 +44,10 @@ export const marketBuilderRoutes: FastifyPluginAsync<{ container: ServiceContain
   // POST /api/market-builder/plan/generate
   // Generate a new plan for the client's active ICP. Returns draft plan — no DB write.
   app.post('/plan/generate', async (request, reply) => {
-    const { clientId } = generateBody.parse(request.body);
-    log.info({ clientId }, 'Generating market builder plan');
+    const { clientId, icpId } = generateBody.parse(request.body);
+    log.info({ clientId, icpId }, 'Generating market builder plan');
 
-    const plan = await marketBuilder.generatePlan(clientId);
+    const plan = await marketBuilder.generatePlan(clientId, icpId);
     return reply.send({ data: plan });
   });
 

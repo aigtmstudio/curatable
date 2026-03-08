@@ -482,7 +482,7 @@ export default function ListsPage() {
                           if (!clientId) return;
                           setAiPlanApproving(true);
                           try {
-                            const saved = await marketBuilderApi.approveMarketPlan(clientId, aiPlan);
+                            const saved = await marketBuilderApi.approveMarketPlan(clientId, aiPlan, list?.icpId ?? undefined);
                             setAiSavedPlan(saved);
                             await marketBuilderApi.executeMarketPlan(saved.id, clientId, buildOptionsTarget ?? undefined);
                             toast.success('AI market build started in background');

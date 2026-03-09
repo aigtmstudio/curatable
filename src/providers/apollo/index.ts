@@ -216,21 +216,33 @@ export class ApolloProvider extends BaseProvider implements DataProvider {
     if (params.cities?.length) locations.push(...params.cities);
     if (locations.length) body.organization_locations = locations;
 
-    // Merge industries + keywords into q_organization_keyword_tags for OR-based
-    // relevance ranking. DO NOT use organization_industries as a hard filter —
-    // ICP industry values often include non-standard names (e.g. "lawyers",
-    // "agency") that don't match Apollo's LinkedIn-sourced taxonomy, causing
-    // the entire search to return 0 results. Keyword tags are more forgiving.
-    const allTags = new Set<string>();
+    // Split ICP industries into valid Apollo taxonomy values (hard filter) vs
+    // non-standard terms (soft keyword tags). Apollo's organization_industries
+    // requires exact LinkedIn taxonomy names — non-standard values cause 0 results.
+    const validIndustries: string[] = [];
+    const keywordTags = new Set<string>();
+
     if (params.industries?.length) {
-      for (const ind of params.industries) allTags.add(ind);
+      for (const ind of params.industries) {
+        if (APOLLO_INDUSTRY_TAXONOMY.has(ind)) {
+          validIndustries.push(ind);
+        } else {
+          // Try fuzzy match against taxonomy
+          const matches = fuzzyMatchIndustry(ind);
+          if (matches.length > 0) {
+            validIndustries.push(...matches);
+          } else {
+            keywordTags.add(ind); // Non-standard — use as keyword tag
+          }
+        }
+      }
     }
     if (params.keywords?.length) {
-      for (const kw of params.keywords) allTags.add(kw);
+      for (const kw of params.keywords) keywordTags.add(kw);
     }
-    if (allTags.size > 0) {
-      body.q_organization_keyword_tags = [...allTags];
-    }
+
+    if (validIndustries.length > 0) body.organization_industries = [...new Set(validIndustries)];
+    if (keywordTags.size > 0) body.q_organization_keyword_tags = [...keywordTags];
 
     // Exclude keywords via q_not_keywords (negative freeform search)
     if (params.excludeKeywords?.length) {
@@ -439,5 +451,115 @@ function buildEmployeeRanges(min?: number, max?: number): string[] {
     ranges.push('10001,1000000');
   }
   return ranges.length > 0 ? ranges : ['1,1000000'];
+}
+
+/**
+ * Official Apollo/LinkedIn industry taxonomy.
+ * organization_industries MUST use exact values from this list — non-standard
+ * values cause the entire search to return 0 results.
+ */
+const APOLLO_INDUSTRY_TAXONOMY = new Set([
+  'Accounting', 'Airlines/Aviation', 'Alternative Dispute Resolution',
+  'Alternative Medicine', 'Animation', 'Apparel & Fashion',
+  'Architecture & Planning', 'Arts & Crafts', 'Automotive',
+  'Aviation & Aerospace', 'Banking', 'Biotechnology', 'Broadcast Media',
+  'Building Materials', 'Business Supplies & Equipment', 'Capital Markets',
+  'Chemicals', 'Civic & Social Organization', 'Civil Engineering',
+  'Commercial Real Estate', 'Computer & Network Security', 'Computer Games',
+  'Computer Hardware', 'Computer Networking', 'Computer Software',
+  'Construction', 'Consumer Electronics', 'Consumer Goods',
+  'Consumer Services', 'Cosmetics', 'Dairy', 'Defense & Space', 'Design',
+  'E-Learning', 'Education Management', 'Electrical/Electronic Manufacturing',
+  'Entertainment', 'Environmental Services', 'Events Services',
+  'Executive Office', 'Facilities Services', 'Farming', 'Financial Services',
+  'Fine Art', 'Fishery', 'Food & Beverages', 'Food Production',
+  'Fund-Raising', 'Furniture', 'Gambling & Casinos',
+  'Glass, Ceramics & Concrete', 'Government Administration',
+  'Government Relations', 'Graphic Design', 'Health, Wellness & Fitness',
+  'Higher Education', 'Hospital & Health Care', 'Hospitality',
+  'Human Resources', 'Import & Export', 'Individual & Family Services',
+  'Industrial Automation', 'Information Services',
+  'Information Technology & Services', 'Insurance', 'International Affairs',
+  'International Trade & Development', 'Internet', 'Investment Banking',
+  'Investment Management', 'Judiciary', 'Law Enforcement', 'Law Practice',
+  'Legal Services', 'Legislative Office', 'Leisure, Travel & Tourism',
+  'Libraries', 'Linguistics', 'Logistics & Supply Chain',
+  'Luxury Goods & Jewelry', 'Machinery', 'Management Consulting',
+  'Maritime', 'Market Research', 'Marketing & Advertising',
+  'Mechanical or Industrial Engineering', 'Media Production',
+  'Medical Devices', 'Medical Practice', 'Mental Health Care', 'Military',
+  'Mining & Metals', 'Motion Pictures & Film', 'Museums & Institutions',
+  'Music', 'Nanotechnology', 'Newspapers',
+  'Non-Profit Organization Management', 'Oil & Energy', 'Online Media',
+  'Outsourcing/Offshoring', 'Package/Freight Delivery',
+  'Packaging & Containers', 'Paper & Forest Products', 'Performing Arts',
+  'Pharmaceuticals', 'Philanthropy', 'Photography', 'Plastics',
+  'Political Organization', 'Primary/Secondary Education', 'Printing',
+  'Professional Training & Coaching', 'Program Development', 'Public Policy',
+  'Public Relations & Communications', 'Public Safety', 'Publishing',
+  'Railroad Manufacture', 'Ranching', 'Real Estate',
+  'Recreational Facilities & Services', 'Religious Institutions',
+  'Renewables & Environment', 'Research', 'Restaurants', 'Retail',
+  'Security & Investigations', 'Semiconductors', 'Shipbuilding',
+  'Sporting Goods', 'Sports', 'Staffing & Recruiting', 'Supermarkets',
+  'Telecommunications', 'Textiles', 'Think Tanks', 'Tobacco',
+  'Translation & Localization', 'Transportation/Trucking/Railroad',
+  'Utilities', 'Venture Capital & Private Equity', 'Veterinary',
+  'Warehousing', 'Wholesale', 'Wine & Spirits', 'Wireless',
+  'Writing & Editing',
+]);
+
+/** Lowercase lookup for fuzzy matching ICP industry names to Apollo taxonomy */
+const APOLLO_INDUSTRY_LOWER_MAP = new Map<string, string>();
+for (const name of APOLLO_INDUSTRY_TAXONOMY) {
+  APOLLO_INDUSTRY_LOWER_MAP.set(name.toLowerCase(), name);
+}
+
+/** Common aliases that map to Apollo taxonomy values */
+const INDUSTRY_ALIASES: Record<string, string[]> = {
+  'professional services': ['Management Consulting', 'Legal Services', 'Accounting', 'Financial Services'],
+  'it services': ['Information Technology & Services'],
+  'it consulting': ['Information Technology & Services'],
+  'tech': ['Information Technology & Services', 'Computer Software'],
+  'saas': ['Computer Software', 'Internet'],
+  'recruitment': ['Staffing & Recruiting'],
+  'hr': ['Human Resources'],
+  'healthcare': ['Hospital & Health Care'],
+  'education': ['Education Management', 'Higher Education'],
+  'media': ['Online Media', 'Broadcast Media'],
+  'pr': ['Public Relations & Communications'],
+  'consulting': ['Management Consulting'],
+  'finance': ['Financial Services'],
+  'legal': ['Legal Services', 'Law Practice'],
+  'advertising': ['Marketing & Advertising'],
+  'marketing': ['Marketing & Advertising'],
+  'real estate': ['Commercial Real Estate', 'Real Estate'],
+  'logistics': ['Logistics & Supply Chain'],
+  'manufacturing': ['Electrical/Electronic Manufacturing', 'Mechanical or Industrial Engineering'],
+  'energy': ['Oil & Energy', 'Renewables & Environment'],
+  'travel': ['Leisure, Travel & Tourism'],
+  'food': ['Food & Beverages', 'Food Production'],
+};
+
+/**
+ * Try to match a freeform industry name to the Apollo taxonomy.
+ * Handles case differences, common aliases, and substring matching.
+ * Returns an array since some aliases expand to multiple industries.
+ */
+function fuzzyMatchIndustry(input: string): string[] {
+  const lower = input.toLowerCase().trim();
+
+  // Exact (case-insensitive) match
+  if (APOLLO_INDUSTRY_LOWER_MAP.has(lower)) return [APOLLO_INDUSTRY_LOWER_MAP.get(lower)!];
+
+  // Check aliases
+  if (INDUSTRY_ALIASES[lower]) return INDUSTRY_ALIASES[lower];
+
+  // Substring match: input contains a taxonomy entry or vice versa
+  const matches: string[] = [];
+  for (const [key, value] of APOLLO_INDUSTRY_LOWER_MAP) {
+    if (key.includes(lower) || lower.includes(key)) matches.push(value);
+  }
+  return matches;
 }
 

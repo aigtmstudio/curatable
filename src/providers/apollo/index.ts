@@ -54,109 +54,19 @@ export class ApolloProvider extends BaseProvider implements DataProvider {
       let totalPages = 0;
       const startPage = params.offset ? Math.floor(params.offset / 100) + 1 : 1;
 
-      let body = this.buildSearchBody(params);
+      const body = this.buildSearchBody(params);
 
       this.log.info({ searchBody: body, targetLimit, maxPages }, 'Apollo search starting');
 
-      // Fetch first page to check if q_organization_keyword_tags works
-      const firstRaw = await this.request<ApolloCompanySearchResponse>(
-        'post', '/mixed_companies/search', { body: { ...body, page: startPage, per_page: 100 } },
-      );
-
-      totalEntries = firstRaw.pagination.total_entries;
-      totalPages = firstRaw.pagination.total_pages;
-
-      // If keyword tags returned very few results, fall back to q_keywords (freeform)
-      // This handles cases where the ICP keywords don't match Apollo's taxonomy tags
-      if (totalEntries < targetLimit && body.q_organization_keyword_tags) {
-        const allKeywords = body.q_organization_keyword_tags as string[];
-        this.log.info(
-          { totalEntries, targetLimit, keywords: allKeywords },
-          'q_organization_keyword_tags returned few results, retrying with q_keywords (freeform)',
-        );
-        delete body.q_organization_keyword_tags;
-        body.q_keywords = allKeywords.join('\n');
-
-        const retryRaw = await this.request<ApolloCompanySearchResponse>(
-          'post', '/mixed_companies/search', { body: { ...body, page: startPage, per_page: 100 } },
-        );
-
-        // Use whichever approach found more results
-        if (retryRaw.pagination.total_entries > totalEntries) {
-          this.log.info(
-            { tagResults: totalEntries, keywordResults: retryRaw.pagination.total_entries },
-            'q_keywords returned more results — using freeform keyword search',
-          );
-          totalEntries = retryRaw.pagination.total_entries;
-          totalPages = retryRaw.pagination.total_pages;
-          for (const org of retryRaw.organizations ?? []) {
-            const company = mapApolloOrganization(org);
-            const domain = company.domain?.toLowerCase();
-            if (domain && seenDomains.has(domain)) continue;
-            if (domain) seenDomains.add(domain);
-            allCompanies.push(company);
-          }
-        } else if (totalEntries === 0) {
-          // Both keyword approaches returned 0 — drop keywords entirely
-          // and search by location + employee count only. ICP scoring will
-          // filter for relevance post-fetch.
-          this.log.info('Both keyword approaches returned 0, searching without keywords');
-          delete body.q_keywords;
-          const broadRaw = await this.request<ApolloCompanySearchResponse>(
-            'post', '/mixed_companies/search', { body: { ...body, page: startPage, per_page: 100 } },
-          );
-          if (broadRaw.pagination.total_entries > 0) {
-            this.log.info(
-              { broadResults: broadRaw.pagination.total_entries },
-              'Broad search (no keywords) returning results — ICP scoring will filter',
-            );
-            totalEntries = broadRaw.pagination.total_entries;
-            totalPages = broadRaw.pagination.total_pages;
-            for (const org of broadRaw.organizations ?? []) {
-              const company = mapApolloOrganization(org);
-              const domain = company.domain?.toLowerCase();
-              if (domain && seenDomains.has(domain)) continue;
-              if (domain) seenDomains.add(domain);
-              allCompanies.push(company);
-            }
-          }
-        } else {
-          // Tag search was better or equal, use original first page
-          body = this.buildSearchBody(params); // restore original body
-          for (const org of firstRaw.organizations ?? []) {
-            const company = mapApolloOrganization(org);
-            const domain = company.domain?.toLowerCase();
-            if (domain && seenDomains.has(domain)) continue;
-            if (domain) seenDomains.add(domain);
-            allCompanies.push(company);
-          }
-        }
-      } else {
-        // First page was good, accumulate results
-        for (const org of firstRaw.organizations ?? []) {
-          const company = mapApolloOrganization(org);
-          const domain = company.domain?.toLowerCase();
-          if (domain && seenDomains.has(domain)) continue;
-          if (domain) seenDomains.add(domain);
-          allCompanies.push(company);
-        }
-      }
-
-      this.log.info(
-        { page: startPage, totalPages, totalEntries, accumulated: allCompanies.length, targetLimit },
-        'Apollo search page 1 fetched',
-      );
-
-      // Fetch remaining pages
-      for (let i = 1; i < maxPages; i++) {
-        if (allCompanies.length >= targetLimit) break;
-
+      // Paginate through Apollo results
+      for (let i = 0; i < maxPages; i++) {
         const pageNum = startPage + i;
-        if (pageNum > totalPages) break;
-
         const raw = await this.request<ApolloCompanySearchResponse>(
           'post', '/mixed_companies/search', { body: { ...body, page: pageNum, per_page: 100 } },
         );
+
+        totalEntries = raw.pagination.total_entries;
+        totalPages = raw.pagination.total_pages;
 
         if (!raw.organizations?.length) break;
 
@@ -172,6 +82,9 @@ export class ApolloProvider extends BaseProvider implements DataProvider {
           { page: pageNum, totalPages, totalEntries, accumulated: allCompanies.length, targetLimit },
           'Apollo search page fetched',
         );
+
+        if (allCompanies.length >= targetLimit) break;
+        if (pageNum >= totalPages) break;
       }
 
       return {
@@ -216,41 +129,34 @@ export class ApolloProvider extends BaseProvider implements DataProvider {
     if (params.cities?.length) locations.push(...params.cities);
     if (locations.length) body.organization_locations = locations;
 
-    // Split ICP industries into valid Apollo taxonomy values (hard filter) vs
-    // non-standard terms (soft keyword tags). Apollo's organization_industries
-    // requires exact LinkedIn taxonomy names — non-standard values cause 0 results.
+    // Map ICP industries to valid Apollo taxonomy values. Non-standard names
+    // (e.g. "lawyers", "agency") are dropped — ICP scoring handles keyword
+    // relevance post-fetch. DO NOT combine organization_industries with
+    // q_organization_keyword_tags — Apollo ANDs them, and non-taxonomy keyword
+    // tags cause the entire search to return 0 results.
     const validIndustries: string[] = [];
-    const keywordTags = new Set<string>();
 
     if (params.industries?.length) {
       for (const ind of params.industries) {
         if (APOLLO_INDUSTRY_TAXONOMY.has(ind)) {
           validIndustries.push(ind);
         } else {
-          // Try fuzzy match against taxonomy
           const matches = fuzzyMatchIndustry(ind);
-          if (matches.length > 0) {
-            validIndustries.push(...matches);
-          } else {
-            keywordTags.add(ind); // Non-standard — use as keyword tag
-          }
+          validIndustries.push(...matches);
         }
       }
     }
-    if (params.keywords?.length) {
-      for (const kw of params.keywords) keywordTags.add(kw);
-    }
 
     if (validIndustries.length > 0) body.organization_industries = [...new Set(validIndustries)];
-    if (keywordTags.size > 0) body.q_organization_keyword_tags = [...keywordTags];
 
     // Exclude keywords via q_not_keywords (negative freeform search)
     if (params.excludeKeywords?.length) {
       body.q_not_keywords = params.excludeKeywords.join(' ');
     }
 
-    // Tech stack requires Apollo UIDs, not human-readable names — skipped.
-    // Scoring handles tech stack matching post-discovery.
+    // Keywords and tech stack are NOT sent to Apollo — they over-constrain
+    // searches when combined with industries (AND logic). ICP scoring handles
+    // keyword/tech relevance post-fetch with fuzzy matching.
 
     return body;
   }

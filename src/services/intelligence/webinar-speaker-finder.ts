@@ -456,7 +456,8 @@ Return ONLY valid JSON array (no extra text):
         outreachMessage: s.outreach_message,
       }));
     } catch (err) {
-      log.error({ angleTitle: angle.title, error: err }, 'Speaker scoring failed');
+      const errMsg = err instanceof Error ? { message: err.message, name: err.name, stack: err.stack?.split('\n')[0] } : err;
+      log.error({ angleTitle: angle.title, error: errMsg }, 'Speaker scoring failed');
       return [];
     }
   }

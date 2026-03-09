@@ -9,12 +9,18 @@ export async function httpRequest<T>(
     body?: unknown;
     params?: Record<string, string>;
     timeout?: number;
+    retry?: { limit: number };
   },
 ): Promise<T> {
   const kyOptions: Options = {
     headers: options?.headers,
     timeout: options?.timeout ?? 30000,
-    retry: { limit: 0 },
+    retry: {
+      limit: options?.retry?.limit ?? 0,
+      methods: ['get', 'post'],
+      statusCodes: [408, 429, 500, 502, 503, 504],
+      backoffLimit: 10_000,
+    },
     searchParams: options?.params,
   };
 

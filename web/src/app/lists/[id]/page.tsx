@@ -41,6 +41,7 @@ import { toast } from 'sonner';
 import * as discoveryApi from '@/lib/api/discovery';
 import * as marketBuilderApi from '@/lib/api/market-builder';
 import type { MarketBuilderPlan, SavedPlan as MarketBuilderSavedPlan } from '@/lib/api/market-builder';
+import { Progress } from '@/components/ui/progress';
 import { ErrorBanner } from '@/components/shared/error-banner';
 import type { ColumnDef } from '@tanstack/react-table';
 import type { ListMember, PipelineStage, CompanySignal, ContactSignal, SignalStrengthTier, EngagementBrief } from '@/lib/types';
@@ -988,6 +989,17 @@ export default function ListDetailPage({ params }: { params: Promise<{ id: strin
         toast.success(`Signal detection complete: ${processed} evaluated, ${q} qualified, ${signalsDetected} signals detected`);
         setStageInitialised(false); // re-auto-select furthest stage
       }
+      // Market signals job
+      else if ('enrichment' in output || 'evidenceSearch' in output || 'classification' in output) {
+        const enrichment = output.enrichment as { profiled?: number; skipped?: number; failed?: number } | undefined;
+        const classification = output.classification as { processedCount?: number } | undefined;
+        const parts: string[] = [];
+        if (enrichment?.profiled) parts.push(`${enrichment.profiled} companies profiled`);
+        if (classification?.processedCount) parts.push(`${classification.processedCount} signals classified`);
+        toast.success(`Market signals complete: ${parts.join(', ') || 'done'}`);
+        setApplyingSignals(false);
+        setStageInitialised(false); // re-auto-select furthest stage
+      }
       // Build job
       else {
         const { companiesAdded, companiesDiscovered, warnings } = output as { companiesAdded?: number; companiesDiscovered?: number; warnings?: string[] };
@@ -1171,11 +1183,14 @@ export default function ListDetailPage({ params }: { params: Promise<{ id: strin
   const handleApplyMarketSignals = async () => {
     try {
       setApplyingSignals(true);
-      await applyMarketSignals.mutateAsync(id);
+      const result = await applyMarketSignals.mutateAsync(id);
       toast.success('Applying market signals — enriching profiles, searching for evidence, and classifying...');
+      if (result?.jobId) {
+        await qc.invalidateQueries({ queryKey: listKeys.buildStatus(id) });
+        setBuildingJobId(result.jobId);
+      }
     } catch {
       toast.error('Failed to apply market signals');
-    } finally {
       setApplyingSignals(false);
     }
   };
@@ -1521,6 +1536,24 @@ export default function ListDetailPage({ params }: { params: Promise<{ id: strin
           </CardContent>
         </Card>
       </div>}
+
+      {/* Pipeline progress banner */}
+      {buildingJobId && buildJob && buildJob.status === 'running' && (
+        <Card className="border-primary/30 bg-primary/5">
+          <CardContent className="py-4">
+            <div className="flex items-center gap-3 mb-2">
+              <Loader2 className="h-4 w-4 animate-spin text-primary" />
+              <span className="text-sm font-medium">
+                {(buildJob.output as Record<string, unknown>)?.currentStep as string || 'Processing...'}
+              </span>
+              <span className="text-xs text-muted-foreground ml-auto">
+                Step {buildJob.processedItems ?? 0} of {buildJob.totalItems ?? 3}
+              </span>
+            </div>
+            <Progress value={((buildJob.processedItems ?? 0) / (buildJob.totalItems || 3)) * 100} className="h-2" />
+          </CardContent>
+        </Card>
+      )}
 
       {/* Members Table with Stage Actions */}
       {hasMembers &&

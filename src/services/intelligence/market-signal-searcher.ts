@@ -160,8 +160,8 @@ export class MarketSignalSearcher {
 
     this.log.info({ count: hypotheses.length, existingUrls: existingUrls.size, clientId }, 'Searching for evidence');
 
-    // Process hypotheses in parallel (concurrency of 3 to respect rate limits)
-    const CONCURRENCY = 3;
+    // Process hypotheses in parallel
+    const CONCURRENCY = 8;
     for (let i = 0; i < hypotheses.length; i += CONCURRENCY) {
       const batch = hypotheses.slice(i, i + CONCURRENCY);
       const batchResults = await Promise.allSettled(

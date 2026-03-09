@@ -21,7 +21,7 @@ export class JinaProvider extends BaseProvider implements Partial<DataProvider> 
     super({
       apiKey,
       baseUrl: 'https://r.jina.ai',
-      rateLimit: { perSecond: 8, perMinute: 500 },
+      rateLimit: { perSecond: 20, perMinute: 500 },
     });
     this.log = logger.child({ provider: this.name });
   }
@@ -42,7 +42,8 @@ export class JinaProvider extends BaseProvider implements Partial<DataProvider> 
     try {
       const response = await this.request<JinaReadResponse>('post', '', {
         body: { url },
-        timeout: 30_000,
+        timeout: 45_000,
+        retry: { limit: 2 },
       });
       if (!response.data?.content) return null;
       return {
@@ -63,40 +64,42 @@ export class JinaProvider extends BaseProvider implements Partial<DataProvider> 
    */
   async scrapeCompanyWebsite(domain: string): Promise<{ content: string; tokensUsed: number; pagesScraped: number }> {
     const log = this.log.child({ domain });
-    const sections: string[] = [];
-    let totalChars = 0;
     let totalTokens = 0;
 
-    // Always start with homepage
-    const homepage = await this.readUrl(`https://${domain}`);
-    if (homepage?.content) {
-      const chunk = homepage.content.slice(0, 5000);
-      sections.push(`## Homepage\n${chunk}`);
-      totalChars += chunk.length;
-      totalTokens += homepage.tokensUsed;
-      log.debug({ chars: chunk.length, tokens: homepage.tokensUsed }, 'Scraped homepage');
-    }
+    // Fire homepage + all candidate pages in parallel
+    const allUrls = [
+      { path: 'Homepage', url: `https://${domain}` },
+      ...CANDIDATE_PATHS.map(p => ({ path: p, url: `https://${domain}${p}` })),
+    ];
 
-    // Try candidate pages
+    const results = await Promise.allSettled(
+      allUrls.map(({ url }) => this.readUrl(url)),
+    );
+
+    // Assemble sections in order, respecting page and char limits
+    const sections: string[] = [];
+    let totalChars = 0;
     let pagesScraped = 0;
-    for (const path of CANDIDATE_PATHS) {
-      if (pagesScraped >= MAX_PAGES - 1) break; // -1 for homepage
+
+    for (let i = 0; i < results.length; i++) {
+      if (pagesScraped >= MAX_PAGES) break;
       if (totalChars >= MAX_COMBINED_CHARS) break;
 
-      const result = await this.readUrl(`https://${domain}${path}`);
-      if (result?.content && result.content.length > 200) {
-        const remaining = MAX_COMBINED_CHARS - totalChars;
-        const chunk = result.content.slice(0, Math.min(4000, remaining));
-        sections.push(`## ${path}\n${chunk}`);
-        totalChars += chunk.length;
-        totalTokens += result.tokensUsed;
-        pagesScraped++;
-        log.debug({ path, chars: chunk.length, tokens: result.tokensUsed }, 'Scraped page');
-      }
+      const settled = results[i];
+      if (settled.status !== 'fulfilled' || !settled.value?.content) continue;
+      // Skip sub-pages with very little content (likely 404 soft-pages)
+      if (i > 0 && settled.value.content.length <= 200) continue;
+
+      const maxChunk = i === 0 ? 5000 : Math.min(4000, MAX_COMBINED_CHARS - totalChars);
+      const chunk = settled.value.content.slice(0, maxChunk);
+      sections.push(`## ${allUrls[i].path}\n${chunk}`);
+      totalChars += chunk.length;
+      totalTokens += settled.value.tokensUsed;
+      pagesScraped++;
+      log.debug({ path: allUrls[i].path, chars: chunk.length, tokens: settled.value.tokensUsed }, 'Scraped page');
     }
 
-    const totalPages = pagesScraped + (homepage?.content ? 1 : 0);
-    log.info({ pages: totalPages, totalChars, totalTokens }, 'Website scrape complete');
-    return { content: sections.join('\n\n'), tokensUsed: totalTokens, pagesScraped: totalPages };
+    log.info({ pages: pagesScraped, totalChars, totalTokens }, 'Website scrape complete');
+    return { content: sections.join('\n\n'), tokensUsed: totalTokens, pagesScraped };
   }
 }

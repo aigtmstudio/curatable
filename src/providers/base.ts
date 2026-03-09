@@ -42,7 +42,7 @@ export abstract class BaseProvider implements Partial<DataProvider> {
   protected async request<T>(
     method: 'get' | 'post' | 'put' | 'delete',
     path: string,
-    options?: { body?: unknown; params?: Record<string, string>; timeout?: number },
+    options?: { body?: unknown; params?: Record<string, string>; timeout?: number; retry?: { limit: number } },
   ): Promise<T> {
     await this.acquireSlot();
 
@@ -51,6 +51,7 @@ export abstract class BaseProvider implements Partial<DataProvider> {
       body: options?.body,
       params: options?.params,
       timeout: options?.timeout,
+      retry: options?.retry,
     });
   }
 

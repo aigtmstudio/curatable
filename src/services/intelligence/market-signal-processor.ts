@@ -269,13 +269,13 @@ export class MarketSignalProcessor {
         ? hypotheses.map((h, i) => `[${i}] ${h.hypothesis} (category: ${h.signalCategory})`).join('\n')
         : 'No hypotheses defined. Classify the signal by category only.';
 
-      // Classify signals in parallel (concurrency of 5)
+      // Classify signals in parallel
       let classificationPrompt = CLASSIFICATION_PROMPT;
       if (this.promptConfig) {
         try { classificationPrompt = await this.promptConfig.getPrompt('signal.market.classification.system'); } catch { /* use default */ }
       }
 
-      const CLASSIFY_CONCURRENCY = 5;
+      const CLASSIFY_CONCURRENCY = 15;
       for (let si = 0; si < signals.length; si += CLASSIFY_CONCURRENCY) {
         const signalBatch = signals.slice(si, si + CLASSIFY_CONCURRENCY);
         const results = await Promise.allSettled(

@@ -115,7 +115,7 @@ export class DeepEnrichmentService {
     this.log.info({ count: companies.length, clientId }, 'Starting deep enrichment batch');
 
     // Process with concurrency limit
-    const concurrency = 5;
+    const concurrency = 15;
     for (let i = 0; i < companies.length; i += concurrency) {
       const batch = companies.slice(i, i + concurrency);
       const results = await Promise.allSettled(

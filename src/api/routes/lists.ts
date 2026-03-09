@@ -119,7 +119,7 @@ export const listRoutes: FastifyPluginAsync<{ container: ServiceContainer }> = a
       .select()
       .from(schema.jobs)
       .where(and(
-        inArray(schema.jobs.type, ['list_build', 'contact_list_build', 'persona_signal_detection', 'company_signals', 'brief_generation']),
+        inArray(schema.jobs.type, ['list_build', 'contact_list_build', 'persona_signal_detection', 'company_signals', 'brief_generation', 'market_signal_search']),
         sql`(${schema.jobs.input}->>'listId' = ${listId} OR ${schema.jobs.input}->>'contactListId' = ${listId})`,
       ))
       .orderBy(desc(schema.jobs.createdAt))
@@ -667,6 +667,12 @@ export const listRoutes: FastifyPluginAsync<{ container: ServiceContainer }> = a
       })
       .returning();
 
+    // Set totalItems so the UI can show a progress bar (3 steps)
+    await db
+      .update(schema.jobs)
+      .set({ totalItems: 3, processedItems: 0, startedAt: new Date() })
+      .where(eq(schema.jobs.id, job.id));
+
     reply.status(202).send({ data: { jobId: job.id } });
 
     // Run the full pipeline in background
@@ -674,10 +680,23 @@ export const listRoutes: FastifyPluginAsync<{ container: ServiceContainer }> = a
       const log = logger.child({ listId: list.id, jobId: job.id });
       const output: Record<string, unknown> = {};
 
+      // Helper to update job progress
+      const updateProgress = async (step: number, stepLabel: string) => {
+        await db
+          .update(schema.jobs)
+          .set({
+            processedItems: step,
+            output: { ...output, currentStep: stepLabel },
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.jobs.id, job.id));
+      };
+
       try {
         // Step 1: Deep enrich unprofiled companies
         if (opts.container.deepEnrichmentService) {
           log.info('Step 1/3: Deep enrichment');
+          await updateProgress(0, 'Deep enrichment — profiling company websites');
           const enrichResult = await opts.container.deepEnrichmentService.enrichBatch(
             list.clientId, companyIds, { jobId: job.id },
           );
@@ -686,27 +705,33 @@ export const listRoutes: FastifyPluginAsync<{ container: ServiceContainer }> = a
         } else {
           output.enrichment = { skipped: true, reason: 'No Jina API key configured' };
         }
+        await updateProgress(1, 'Deep enrichment complete');
 
         // Step 2: Search for evidence from active hypotheses
         if (opts.container.marketSignalSearcher) {
           log.info('Step 2/3: Evidence search');
+          await updateProgress(1, 'Searching for market signal evidence');
           const searchResult = await opts.container.marketSignalSearcher.searchForEvidence(list.clientId);
           output.evidenceSearch = searchResult;
           log.info(searchResult, 'Evidence search complete');
         } else {
           output.evidenceSearch = { skipped: true, reason: 'No search providers configured' };
         }
+        await updateProgress(2, 'Evidence search complete');
 
         // Step 3: Classify unprocessed signals + promote matching companies
         log.info('Step 3/3: Signal classification + promotion');
+        await updateProgress(2, 'Classifying signals and promoting companies');
         const processedCount = await opts.container.marketSignalProcessor.processUnclassifiedSignals(list.clientId);
         output.classification = { processedCount };
         log.info({ processedCount }, 'Signal classification complete');
 
+        delete output.currentStep;
         await db
           .update(schema.jobs)
           .set({
             status: 'completed',
+            processedItems: 3,
             output,
             completedAt: new Date(),
             updatedAt: new Date(),
@@ -720,7 +745,7 @@ export const listRoutes: FastifyPluginAsync<{ container: ServiceContainer }> = a
           .update(schema.jobs)
           .set({
             status: 'failed',
-            output,
+            output: { ...output, currentStep: 'Failed' },
             completedAt: new Date(),
             updatedAt: new Date(),
             errors: [{ item: list.id, error: String(error), timestamp: new Date().toISOString() }],

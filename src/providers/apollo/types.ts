@@ -23,6 +23,7 @@ export interface ApolloOrganization {
   short_description?: string;
   phone?: string;
   technology_names?: string[];
+  keywords?: string[];
 }
 
 export interface ApolloPerson {

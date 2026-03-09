@@ -47,52 +47,52 @@ export class ApolloProvider extends BaseProvider implements DataProvider {
   async searchCompanies(params: CompanySearchParams): Promise<PaginatedResponse<UnifiedCompany>> {
     try {
       const targetLimit = params.limit ?? 25;
-      const maxPages = Math.min(Math.ceil(targetLimit / 100), 25); // safety cap: 2,500 results
-      const allCompanies: UnifiedCompany[] = [];
-      const seenDomains = new Set<string>();
-      let totalEntries = 0;
-      let totalPages = 0;
-      const startPage = params.offset ? Math.floor(params.offset / 100) + 1 : 1;
+      const maxPages = Math.min(Math.ceil(targetLimit / 100), 25);
 
-      const body = this.buildSearchBody(params);
+      // Phase 1: Industry search (taxonomy-validated industries + location + headcount)
+      const industryBody = this.buildIndustryBody(params);
+      this.log.info({ searchBody: industryBody, targetLimit, maxPages, phase: 'industry' }, 'Apollo industry search starting');
+      const industryResult = await this.paginateSearch(industryBody, targetLimit, maxPages);
 
-      this.log.info({ searchBody: body, targetLimit, maxPages }, 'Apollo search starting');
+      this.log.info(
+        { phase: 'industry', totalEntries: industryResult.totalEntries, fetched: industryResult.companies.length },
+        'Apollo industry search complete',
+      );
 
-      // Paginate through Apollo results
-      for (let i = 0; i < maxPages; i++) {
-        const pageNum = startPage + i;
-        const raw = await this.request<ApolloCompanySearchResponse>(
-          'post', '/mixed_companies/search', { body: { ...body, page: pageNum, per_page: 100 } },
-        );
+      // Phase 2: Keyword search (keyword tags + location + headcount, NO industries)
+      // q_organization_keyword_tags uses OR — invalid tags are silently ignored
+      const keywordTags = simplifyKeywords([...(params.industries ?? []), ...(params.keywords ?? [])]);
+      let keywordResult = { companies: [] as UnifiedCompany[], totalEntries: 0 };
 
-        totalEntries = raw.pagination.total_entries;
-        totalPages = raw.pagination.total_pages;
-
-        if (!raw.organizations?.length) break;
-
-        for (const org of raw.organizations) {
-          const company = mapApolloOrganization(org);
-          const domain = company.domain?.toLowerCase();
-          if (domain && seenDomains.has(domain)) continue;
-          if (domain) seenDomains.add(domain);
-          allCompanies.push(company);
-        }
+      if (keywordTags.length > 0) {
+        const keywordBody = this.buildKeywordBody(params, keywordTags);
+        this.log.info({ searchBody: keywordBody, phase: 'keyword' }, 'Apollo keyword search starting');
+        keywordResult = await this.paginateSearch(keywordBody, targetLimit, maxPages);
 
         this.log.info(
-          { page: pageNum, totalPages, totalEntries, accumulated: allCompanies.length, targetLimit },
-          'Apollo search page fetched',
+          { phase: 'keyword', totalEntries: keywordResult.totalEntries, fetched: keywordResult.companies.length },
+          'Apollo keyword search complete',
         );
-
-        if (allCompanies.length >= targetLimit) break;
-        if (pageNum >= totalPages) break;
       }
+
+      // Merge: keyword results first (more relevant), then industry-only, dedup by domain
+      const merged: UnifiedCompany[] = [];
+      const seenDomains = new Set<string>();
+      for (const company of [...keywordResult.companies, ...industryResult.companies]) {
+        const d = company.domain?.toLowerCase();
+        if (d && seenDomains.has(d)) continue;
+        if (d) seenDomains.add(d);
+        merged.push(company);
+        if (merged.length >= targetLimit) break;
+      }
+
+      const totalEntries = Math.max(industryResult.totalEntries, keywordResult.totalEntries);
 
       return {
         success: true,
-        data: allCompanies,
+        data: merged,
         totalResults: totalEntries,
-        hasMore: allCompanies.length < totalEntries,
-        nextPageToken: startPage + Math.min(maxPages, totalPages),
+        hasMore: merged.length < totalEntries,
         creditsConsumed: 0,
         fieldsPopulated: ['name', 'domain', 'industry'],
         qualityScore: 0.5,
@@ -110,7 +110,73 @@ export class ApolloProvider extends BaseProvider implements DataProvider {
     }
   }
 
-  private buildSearchBody(params: CompanySearchParams): Record<string, unknown> {
+  /** Paginate through Apollo search results, deduplicating by domain */
+  private async paginateSearch(
+    body: Record<string, unknown>,
+    targetLimit: number,
+    maxPages: number,
+  ): Promise<{ companies: UnifiedCompany[]; totalEntries: number }> {
+    const companies: UnifiedCompany[] = [];
+    const seenDomains = new Set<string>();
+    let totalEntries = 0;
+
+    for (let i = 0; i < maxPages; i++) {
+      const pageNum = i + 1;
+      const raw = await this.request<ApolloCompanySearchResponse>(
+        'post', '/mixed_companies/search', { body: { ...body, page: pageNum, per_page: 100 } },
+      );
+
+      totalEntries = raw.pagination.total_entries;
+      if (!raw.organizations?.length) break;
+
+      for (const org of raw.organizations) {
+        const company = mapApolloOrganization(org);
+        const domain = company.domain?.toLowerCase();
+        if (domain && seenDomains.has(domain)) continue;
+        if (domain) seenDomains.add(domain);
+        companies.push(company);
+      }
+
+      this.log.info(
+        { page: pageNum, totalPages: raw.pagination.total_pages, totalEntries, accumulated: companies.length },
+        'Apollo search page fetched',
+      );
+
+      if (companies.length >= targetLimit) break;
+      if (pageNum >= raw.pagination.total_pages) break;
+    }
+
+    return { companies, totalEntries };
+  }
+
+  /** Build search body with taxonomy-validated industries (no keywords) */
+  private buildIndustryBody(params: CompanySearchParams): Record<string, unknown> {
+    const body = this.buildBaseBody(params);
+
+    const validIndustries: string[] = [];
+    if (params.industries?.length) {
+      for (const ind of params.industries) {
+        if (APOLLO_INDUSTRY_TAXONOMY.has(ind)) {
+          validIndustries.push(ind);
+        } else {
+          validIndustries.push(...fuzzyMatchIndustry(ind));
+        }
+      }
+    }
+    if (validIndustries.length > 0) body.organization_industries = [...new Set(validIndustries)];
+
+    return body;
+  }
+
+  /** Build search body with keyword tags only (no industries — avoids AND problem) */
+  private buildKeywordBody(params: CompanySearchParams, tags: string[]): Record<string, unknown> {
+    const body = this.buildBaseBody(params);
+    body.q_organization_keyword_tags = tags;
+    return body;
+  }
+
+  /** Shared base: location + headcount + excludes */
+  private buildBaseBody(params: CompanySearchParams): Record<string, unknown> {
     const body: Record<string, unknown> = {};
 
     if (params.employeeCountMin != null || params.employeeCountMax != null) {
@@ -119,44 +185,15 @@ export class ApolloProvider extends BaseProvider implements DataProvider {
       );
     }
 
-    // Revenue and funding stage intentionally excluded — they over-constrain
-    // Apollo searches. Post-discovery ICP scoring handles these dimensions.
-
-    // Location filters: Apollo expects full country names, not ISO codes
     const locations: string[] = [];
     if (params.countries?.length) locations.push(...params.countries.map(expandCountryCode));
     if (params.states?.length) locations.push(...params.states);
     if (params.cities?.length) locations.push(...params.cities);
     if (locations.length) body.organization_locations = locations;
 
-    // Map ICP industries to valid Apollo taxonomy values. Non-standard names
-    // (e.g. "lawyers", "agency") are dropped — ICP scoring handles keyword
-    // relevance post-fetch. DO NOT combine organization_industries with
-    // q_organization_keyword_tags — Apollo ANDs them, and non-taxonomy keyword
-    // tags cause the entire search to return 0 results.
-    const validIndustries: string[] = [];
-
-    if (params.industries?.length) {
-      for (const ind of params.industries) {
-        if (APOLLO_INDUSTRY_TAXONOMY.has(ind)) {
-          validIndustries.push(ind);
-        } else {
-          const matches = fuzzyMatchIndustry(ind);
-          validIndustries.push(...matches);
-        }
-      }
-    }
-
-    if (validIndustries.length > 0) body.organization_industries = [...new Set(validIndustries)];
-
-    // Exclude keywords via q_not_keywords (negative freeform search)
     if (params.excludeKeywords?.length) {
       body.q_not_keywords = params.excludeKeywords.join(' ');
     }
-
-    // Keywords and tech stack are NOT sent to Apollo — they over-constrain
-    // searches when combined with industries (AND logic). ICP scoring handles
-    // keyword/tech relevance post-fetch with fuzzy matching.
 
     return body;
   }
@@ -327,6 +364,23 @@ const COUNTRY_CODE_MAP: Record<string, string> = {
   cn: 'China',
   nz: 'New Zealand',
 };
+
+function simplifyKeywords(raw: string[]): string[] {
+  const tags = new Set<string>();
+  for (const kw of raw) {
+    const lower = kw.toLowerCase().trim();
+    if (!lower) continue;
+    tags.add(lower);
+    // Split compound terms on " & " or " and "
+    if (lower.includes(' & ') || lower.includes(' and ')) {
+      for (const part of lower.split(/\s*[&]\s*|\s+and\s+/)) {
+        const trimmed = part.trim();
+        if (trimmed.length > 2) tags.add(trimmed);
+      }
+    }
+  }
+  return [...tags];
+}
 
 function expandCountryCode(code: string): string {
   return COUNTRY_CODE_MAP[code.toLowerCase()] ?? code;

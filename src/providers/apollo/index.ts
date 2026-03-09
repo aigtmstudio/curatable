@@ -54,16 +54,85 @@ export class ApolloProvider extends BaseProvider implements DataProvider {
       let totalPages = 0;
       const startPage = params.offset ? Math.floor(params.offset / 100) + 1 : 1;
 
-      const body = this.buildSearchBody(params);
+      let body = this.buildSearchBody(params);
 
-      for (let i = 0; i < maxPages; i++) {
+      this.log.info({ searchBody: body, targetLimit, maxPages }, 'Apollo search starting');
+
+      // Fetch first page to check if q_organization_keyword_tags works
+      const firstRaw = await this.request<ApolloCompanySearchResponse>(
+        'post', '/mixed_companies/search', { body: { ...body, page: startPage, per_page: 100 } },
+      );
+
+      totalEntries = firstRaw.pagination.total_entries;
+      totalPages = firstRaw.pagination.total_pages;
+
+      // If keyword tags returned very few results, fall back to q_keywords (freeform)
+      // This handles cases where the ICP keywords don't match Apollo's taxonomy tags
+      if (totalEntries < targetLimit && params.keywords?.length && body.q_organization_keyword_tags) {
+        this.log.info(
+          { totalEntries, targetLimit, keywords: params.keywords },
+          'q_organization_keyword_tags returned few results, retrying with q_keywords (freeform)',
+        );
+        delete body.q_organization_keyword_tags;
+        body.q_keywords = params.keywords.join('\n');
+
+        const retryRaw = await this.request<ApolloCompanySearchResponse>(
+          'post', '/mixed_companies/search', { body: { ...body, page: startPage, per_page: 100 } },
+        );
+
+        // Use whichever approach found more results
+        if (retryRaw.pagination.total_entries > totalEntries) {
+          this.log.info(
+            { tagResults: totalEntries, keywordResults: retryRaw.pagination.total_entries },
+            'q_keywords returned more results — using freeform keyword search',
+          );
+          totalEntries = retryRaw.pagination.total_entries;
+          totalPages = retryRaw.pagination.total_pages;
+          // Re-accumulate from the freeform first page
+          for (const org of retryRaw.organizations ?? []) {
+            const company = mapApolloOrganization(org);
+            const domain = company.domain?.toLowerCase();
+            if (domain && seenDomains.has(domain)) continue;
+            if (domain) seenDomains.add(domain);
+            allCompanies.push(company);
+          }
+        } else {
+          // Tag search was better or equal, use original first page
+          body = this.buildSearchBody(params); // restore original body
+          for (const org of firstRaw.organizations ?? []) {
+            const company = mapApolloOrganization(org);
+            const domain = company.domain?.toLowerCase();
+            if (domain && seenDomains.has(domain)) continue;
+            if (domain) seenDomains.add(domain);
+            allCompanies.push(company);
+          }
+        }
+      } else {
+        // First page was good, accumulate results
+        for (const org of firstRaw.organizations ?? []) {
+          const company = mapApolloOrganization(org);
+          const domain = company.domain?.toLowerCase();
+          if (domain && seenDomains.has(domain)) continue;
+          if (domain) seenDomains.add(domain);
+          allCompanies.push(company);
+        }
+      }
+
+      this.log.info(
+        { page: startPage, totalPages, totalEntries, accumulated: allCompanies.length, targetLimit },
+        'Apollo search page 1 fetched',
+      );
+
+      // Fetch remaining pages
+      for (let i = 1; i < maxPages; i++) {
+        if (allCompanies.length >= targetLimit) break;
+
         const pageNum = startPage + i;
+        if (pageNum > totalPages) break;
+
         const raw = await this.request<ApolloCompanySearchResponse>(
           'post', '/mixed_companies/search', { body: { ...body, page: pageNum, per_page: 100 } },
         );
-
-        totalEntries = raw.pagination.total_entries;
-        totalPages = raw.pagination.total_pages;
 
         if (!raw.organizations?.length) break;
 
@@ -79,9 +148,6 @@ export class ApolloProvider extends BaseProvider implements DataProvider {
           { page: pageNum, totalPages, totalEntries, accumulated: allCompanies.length, targetLimit },
           'Apollo search page fetched',
         );
-
-        if (allCompanies.length >= targetLimit) break;
-        if (pageNum >= totalPages) break;
       }
 
       return {
@@ -127,9 +193,8 @@ export class ApolloProvider extends BaseProvider implements DataProvider {
     if (params.cities?.length) locations.push(...params.cities);
     if (locations.length) body.organization_locations = locations;
 
-    // Use q_organization_keyword_tags (OR-based, relevance-ranked) instead of
-    // q_keywords (freeform AND-like text search). Tags match Apollo's company-level
-    // keyword taxonomy — more matching tags = higher relevance rank.
+    // Use q_organization_keyword_tags for OR-based keyword tag matching (Apollo's
+    // company-level taxonomy). More matching tags = higher relevance rank.
     if (params.keywords?.length) {
       body.q_organization_keyword_tags = params.keywords;
     }

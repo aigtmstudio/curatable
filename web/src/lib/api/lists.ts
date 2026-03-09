@@ -160,8 +160,8 @@ export async function deepEnrich(id: string): Promise<{ jobId: string }> {
   return res.data;
 }
 
-export async function applyMarketSignals(id: string): Promise<{ jobId: string }> {
-  const res = await apiClient.post<ApiResponse<{ jobId: string }>>(`/api/lists/${id}/apply-market-signals`);
+export async function applyMarketSignals(id: string, options?: { forceFresh?: boolean }): Promise<{ jobId: string }> {
+  const res = await apiClient.post<ApiResponse<{ jobId: string }>>(`/api/lists/${id}/apply-market-signals`, options);
   return res.data;
 }
 

@@ -656,6 +656,25 @@ export const listRoutes: FastifyPluginAsync<{ container: ServiceContainer }> = a
       return reply.status(400).send({ error: 'List has no company members' });
     }
 
+    // Pre-flight: check that active market hypotheses exist
+    const [hypothesisCount] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(schema.signalHypotheses)
+      .where(and(
+        eq(schema.signalHypotheses.clientId, list.clientId),
+        eq(schema.signalHypotheses.signalLevel, 'market'),
+        eq(schema.signalHypotheses.status, 'active'),
+      ));
+    if (!hypothesisCount || hypothesisCount.count === 0) {
+      return reply.status(400).send({
+        error: 'No active market hypotheses found. Generate hypotheses first before applying market signals.',
+      });
+    }
+
+    // Parse options from request body
+    const body = request.body as { forceFresh?: boolean } | undefined;
+    const forceFresh = body?.forceFresh === true;
+
     // Create a job to track the composite pipeline
     const [job] = await db
       .insert(schema.jobs)
@@ -711,7 +730,10 @@ export const listRoutes: FastifyPluginAsync<{ container: ServiceContainer }> = a
         if (opts.container.marketSignalSearcher) {
           log.info('Step 2/3: Evidence search');
           await updateProgress(1, 'Searching for market signal evidence');
-          const searchResult = await opts.container.marketSignalSearcher.searchForEvidence(list.clientId);
+          const searchResult = await opts.container.marketSignalSearcher.searchForEvidence(
+            list.clientId,
+            { cooldownHours: forceFresh ? 0 : undefined },
+          );
           output.evidenceSearch = searchResult;
           log.info(searchResult, 'Evidence search complete');
         } else {

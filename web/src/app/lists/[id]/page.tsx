@@ -1188,17 +1188,20 @@ export default function ListDetailPage({ params }: { params: Promise<{ id: strin
     }
   };
 
-  const handleApplyMarketSignals = async () => {
+  const handleApplyMarketSignals = async (forceFresh = false) => {
     try {
       setApplyingSignals(true);
-      const result = await applyMarketSignals.mutateAsync(id);
+      const result = await applyMarketSignals.mutateAsync({ id, forceFresh });
       toast.success('Applying market signals — enriching profiles, searching for evidence, and classifying...');
       if (result?.jobId) {
         await qc.invalidateQueries({ queryKey: listKeys.buildStatus(id) });
         setBuildingJobId(result.jobId);
       }
-    } catch {
-      toast.error('Failed to apply market signals');
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to apply market signals';
+      // ApiError puts the backend error string in .code
+      const code = (err as { code?: string })?.code;
+      toast.error(code && code !== 'REQUEST_FAILED' ? code : message);
       setApplyingSignals(false);
     }
   };
@@ -1573,7 +1576,7 @@ export default function ListDetailPage({ params }: { params: Promise<{ id: strin
           <div className="flex flex-wrap gap-2">
             {selectedStage === 'tam' && (funnel?.stages?.tam ?? 0) > 0 && (
               <Button
-                onClick={handleApplyMarketSignals}
+                onClick={() => handleApplyMarketSignals()}
                 disabled={applyMarketSignals.isPending || applyingSignals}
                 size="sm"
               >

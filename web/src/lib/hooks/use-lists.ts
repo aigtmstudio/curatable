@@ -173,13 +173,14 @@ export function useContactSignals(listId: string | null, clientId: string | null
 export function useApplyMarketSignals() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: listsApi.applyMarketSignals,
-    onSuccess: (_, listId) => {
+    mutationFn: ({ id, forceFresh }: { id: string; forceFresh?: boolean }) =>
+      listsApi.applyMarketSignals(id, { forceFresh }),
+    onSuccess: (_, { id }) => {
       qc.invalidateQueries({ queryKey: ['lists'] });
       qc.invalidateQueries({ queryKey: ['jobs'] });
-      qc.invalidateQueries({ queryKey: listKeys.funnel(listId) });
-      qc.invalidateQueries({ queryKey: listKeys.members(listId) });
-      qc.invalidateQueries({ queryKey: listKeys.memberSignals(listId) });
+      qc.invalidateQueries({ queryKey: listKeys.funnel(id) });
+      qc.invalidateQueries({ queryKey: listKeys.members(id) });
+      qc.invalidateQueries({ queryKey: listKeys.memberSignals(id) });
     },
   });
 }

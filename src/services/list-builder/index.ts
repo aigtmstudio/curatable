@@ -658,11 +658,20 @@ export class ListBuilder {
           const { signals, scoreResult, memberId } = settled.value;
           totalSignals += signals.length;
 
-          // Apply timeliness multiplier: old/undated signals get heavily penalized
-          const adjustedSignals = signals.map(s => ({
-            ...s,
-            adjustedStrength: applyTimeliness(s.signalStrength, s.eventDate ?? (s.details as Record<string, unknown>)?.eventDate as string | undefined),
-          }));
+          // Apply timeliness multiplier only to time-sensitive signals (those with event dates).
+          // Rule-based signals (hiring, expansion, tech adoption) describe current state and
+          // should not be penalised for lacking a date.
+          const TIME_SENSITIVE_TYPES = new Set(['recent_funding', 'market_signal']);
+          const adjustedSignals = signals.map(s => {
+            const eventDate = s.eventDate ?? (s.details as Record<string, unknown>)?.eventDate as string | undefined;
+            const shouldApplyTimeliness = TIME_SENSITIVE_TYPES.has(s.signalType) || !!eventDate;
+            return {
+              ...s,
+              adjustedStrength: shouldApplyTimeliness
+                ? applyTimeliness(s.signalStrength, eventDate)
+                : s.signalStrength,
+            };
+          });
           const hasVeryStrong = adjustedSignals.some(s => s.adjustedStrength >= 0.85);
           const hasMultipleStrong = adjustedSignals.filter(s => s.adjustedStrength >= 0.7).length >= 2;
           if (hasVeryStrong || hasMultipleStrong) {

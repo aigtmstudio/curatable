@@ -1,7 +1,10 @@
 import PgBoss from 'pg-boss';
 import { getDb, schema } from '../../db/index.js';
-import { eq, and, isNotNull } from 'drizzle-orm';
+import { eq, and, isNotNull, lt } from 'drizzle-orm';
 import { logger } from '../../lib/logger.js';
+
+const STALE_JOB_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const STALE_JOB_THRESHOLD_MS = 15 * 60 * 1000; // 15 minutes
 
 export const JOB_TYPES = {
   LIST_REFRESH: 'list-refresh',
@@ -14,6 +17,7 @@ export const JOB_TYPES = {
 
 export class Scheduler {
   private boss: PgBoss;
+  private staleJobTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(connectionString: string) {
     this.boss = new PgBoss({
@@ -75,6 +79,12 @@ export class Scheduler {
     }
 
     await this.registerListRefreshSchedules();
+
+    // Start stale job reaper — auto-fails jobs stuck in "running" with no progress
+    this.staleJobTimer = setInterval(() => this.reapStaleJobs(), STALE_JOB_CHECK_INTERVAL_MS);
+    // Run once immediately on startup to catch jobs orphaned by a restart
+    void this.reapStaleJobs();
+
     logger.info('Scheduler started');
   }
 
@@ -159,7 +169,48 @@ export class Scheduler {
     logger.info('Demo cron jobs registered (signals 05:30 UTC, buzz 06:00 UTC)');
   }
 
+  private async reapStaleJobs(): Promise<void> {
+    try {
+      const db = getDb();
+      const cutoff = new Date(Date.now() - STALE_JOB_THRESHOLD_MS);
+
+      const staleJobs = await db
+        .select({ id: schema.jobs.id, type: schema.jobs.type, updatedAt: schema.jobs.updatedAt })
+        .from(schema.jobs)
+        .where(
+          and(
+            eq(schema.jobs.status, 'running'),
+            lt(schema.jobs.updatedAt, cutoff),
+          ),
+        );
+
+      for (const job of staleJobs) {
+        logger.warn({ jobId: job.id, type: job.type, updatedAt: job.updatedAt }, 'Reaping stale job — no progress for 15 minutes');
+        await db
+          .update(schema.jobs)
+          .set({
+            status: 'failed',
+            output: { currentStep: 'Failed — timed out (no progress for 15 minutes)' },
+            completedAt: new Date(),
+            updatedAt: new Date(),
+            errors: [{ item: job.id, error: 'Job timed out — no progress update for 15 minutes (possible server restart)', timestamp: new Date().toISOString() }],
+          })
+          .where(eq(schema.jobs.id, job.id));
+      }
+
+      if (staleJobs.length > 0) {
+        logger.info({ count: staleJobs.length }, 'Reaped stale jobs');
+      }
+    } catch (error) {
+      logger.error({ error }, 'Failed to reap stale jobs');
+    }
+  }
+
   async stop(): Promise<void> {
+    if (this.staleJobTimer) {
+      clearInterval(this.staleJobTimer);
+      this.staleJobTimer = null;
+    }
     await this.boss.stop();
   }
 }
